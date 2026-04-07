@@ -308,8 +308,15 @@ export default function Home() {
     const parts: string[] = [];
     for (const name of wb.SheetNames) {
       const ws = wb.Sheets[name];
-      const csv = XLSX.utils.sheet_to_csv(ws).trim();
-      if (csv) parts.push(`Sheet: ${name}\n${csv}`);
+      // Drop empty rows and rows that are just commas (empty cells).
+      const cleaned = XLSX.utils
+        .sheet_to_csv(ws)
+        .split("\n")
+        .map((line) => line.replace(/,+$/, "")) // trim trailing empty cells
+        .filter((line) => line.replace(/,/g, "").trim().length > 0)
+        .join("\n")
+        .trim();
+      if (cleaned) parts.push(`Sheet: ${name}\n${cleaned}`);
     }
     return { text: parts.join("\n\n"), pages: wb.SheetNames.length };
   }

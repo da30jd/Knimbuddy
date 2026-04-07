@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 type Mode = "summary" | "keypoints" | "flashcards" | "quiz" | "examguide";
 
