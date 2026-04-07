@@ -437,7 +437,12 @@ export default function Home() {
       setError("Please select at least one document to continue.");
       return;
     }
-    if (!text.trim() || loading) return;
+    if (loading) return;
+    if (!text.trim()) {
+      setActiveMode(mode);
+      setError("Please upload a file or paste some text first.");
+      return;
+    }
     setLoading(mode);
     setActiveMode(mode);
     setOutput("");
