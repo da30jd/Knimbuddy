@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -138,6 +138,104 @@ function Markdown({ children }: { children: string }) {
       >
         {children}
       </ReactMarkdown>
+    </div>
+  );
+}
+
+function parseFlashcards(raw: string): { q: string; a: string }[] {
+  const cards: { q: string; a: string }[] = [];
+  const re = /Q:\s*([\s\S]*?)\nA:\s*([\s\S]*?)(?=\n\s*Q:|\s*$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(raw)) !== null) {
+    const q = m[1].trim();
+    const a = m[2].trim();
+    if (q && a) cards.push({ q, a });
+  }
+  return cards;
+}
+
+function FlashcardsView({ raw }: { raw: string }) {
+  const cards = parseFlashcards(raw);
+  const [index, setIndex] = useState(0);
+  const [flipped, setFlipped] = useState(false);
+
+  useEffect(() => {
+    setIndex(0);
+    setFlipped(false);
+  }, [raw]);
+
+  if (cards.length === 0) {
+    return (
+      <span className="text-muted-foreground">No flashcards parsed.</span>
+    );
+  }
+
+  const card = cards[index];
+  const go = (delta: number) => {
+    setFlipped(false);
+    setIndex((i) => Math.min(cards.length - 1, Math.max(0, i + delta)));
+  };
+
+  return (
+    <div className="flex flex-col items-center gap-4">
+      <div className="text-xs font-medium text-muted-foreground">
+        Card {index + 1} of {cards.length}
+      </div>
+      <button
+        type="button"
+        onClick={() => setFlipped((f) => !f)}
+        className="group relative h-64 w-full max-w-md [perspective:1200px] focus:outline-none"
+        aria-label="Flip card"
+      >
+        <div
+          className={`relative h-full w-full transition-transform duration-500 [transform-style:preserve-3d] ${
+            flipped ? "[transform:rotateY(180deg)]" : ""
+          }`}
+        >
+          {/* Front (Question) */}
+          <div className="absolute inset-0 flex flex-col items-center justify-center rounded-2xl border border-primary/30 bg-card p-6 text-center shadow-md [backface-visibility:hidden]">
+            <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-primary">
+              Question
+            </div>
+            <div className="text-base font-semibold text-foreground">
+              {card.q}
+            </div>
+            <div className="mt-4 text-[11px] text-muted-foreground">
+              Click to flip
+            </div>
+          </div>
+          {/* Back (Answer) */}
+          <div className="absolute inset-0 flex flex-col items-center justify-center rounded-2xl border border-orange-500/40 bg-orange-50 p-6 text-center shadow-md [backface-visibility:hidden] [transform:rotateY(180deg)] dark:bg-orange-950/30">
+            <div className="mb-2 text-[10px] font-bold uppercase tracking-widest text-orange-600">
+              Answer
+            </div>
+            <div className="text-base font-medium text-foreground">
+              {card.a}
+            </div>
+            <div className="mt-4 text-[11px] text-muted-foreground">
+              Click to flip back
+            </div>
+          </div>
+        </div>
+      </button>
+      <div className="flex items-center gap-3">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => go(-1)}
+          disabled={index === 0}
+        >
+          ← Previous
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => go(1)}
+          disabled={index === cards.length - 1}
+        >
+          Next →
+        </Button>
+      </div>
     </div>
   );
 }
@@ -474,7 +572,7 @@ export default function Home() {
       const res = await fetch("/api/study", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, mode }),
+        body: JSON.stringify({ text, mode, nonce: force ? Date.now() : undefined }),
       });
       if (!res.ok || !res.body) {
         const body = await res.text();
@@ -860,12 +958,16 @@ export default function Home() {
                   {isGenerating && !output ? (
                     <SkeletonLines />
                   ) : output ? (
-                    <>
-                      <Markdown>{output}</Markdown>
-                      {isGenerating && (
-                        <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-primary align-middle" />
-                      )}
-                    </>
+                    activeMode === "flashcards" && !isGenerating ? (
+                      <FlashcardsView raw={output} />
+                    ) : (
+                      <>
+                        <Markdown>{output}</Markdown>
+                        {isGenerating && (
+                          <span className="ml-1 inline-block h-4 w-0.5 animate-pulse bg-primary align-middle" />
+                        )}
+                      </>
+                    )
                   ) : (
                     <span className="text-muted-foreground">
                       {text.trim()
