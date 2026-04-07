@@ -157,8 +157,13 @@ function SkeletonLines() {
 export default function Home() {
   const [text, setText] = useState("");
   const [activeMode, setActiveMode] = useState<Mode | null>(null);
-  const [output, setOutput] = useState("");
+  const [outputs, setOutputs] = useState<Partial<Record<Mode, string>>>({});
   const [loading, setLoading] = useState<Mode | null>(null);
+  const output = activeMode ? outputs[activeMode] || "" : "";
+
+  function clearOutputs() {
+    setOutputs({});
+  }
   const [error, setError] = useState<string | null>(null);
   const [pdfs, setPdfs] = useState<
     {
@@ -382,6 +387,7 @@ export default function Home() {
           setText(rebuildText(next));
           return next;
         });
+        clearOutputs();
       }
     } catch (e) {
       setError((e as Error).message || "Upload failed");
@@ -397,6 +403,7 @@ export default function Home() {
       setText(rebuildText(next));
       return next;
     });
+    clearOutputs();
   }
 
   function togglePdf(index: number) {
@@ -407,6 +414,7 @@ export default function Home() {
       setText(rebuildText(next));
       return next;
     });
+    clearOutputs();
   }
 
   function setAllSelected(value: boolean) {
@@ -415,6 +423,7 @@ export default function Home() {
       setText(rebuildText(next));
       return next;
     });
+    clearOutputs();
   }
 
   function noPdfsSelected() {
@@ -424,7 +433,7 @@ export default function Home() {
   function handleClear() {
     setText("");
     setPdfs([]);
-    setOutput("");
+    setOutputs({});
     setActiveMode(null);
     setError(null);
     setMessages([]);
@@ -432,8 +441,8 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  async function handleGenerate(mode: Mode) {
-    console.log("[handleGenerate] clicked", { mode, textLen: text.length });
+  async function handleGenerate(mode: Mode, force = false) {
+    console.log("[handleGenerate] clicked", { mode, force, textLen: text.length });
     if (mode === "ask") {
       setActiveMode("ask");
       setError(null);
@@ -450,9 +459,16 @@ export default function Home() {
       setError("Please upload a file or paste some text first.");
       return;
     }
+    // Reuse cached output if we already generated this mode for the
+    // current input. Skip the cache when the user explicitly regenerates.
+    if (!force && outputs[mode]) {
+      setActiveMode(mode);
+      setError(null);
+      return;
+    }
     setLoading(mode);
     setActiveMode(mode);
-    setOutput("");
+    setOutputs((prev) => ({ ...prev, [mode]: "" }));
     setError(null);
     try {
       const res = await fetch("/api/study", {
@@ -470,7 +486,8 @@ export default function Home() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        setOutput((prev) => prev + decoder.decode(value, { stream: true }));
+        const chunk = decoder.decode(value, { stream: true });
+        setOutputs((prev) => ({ ...prev, [mode]: (prev[mode] || "") + chunk }));
       }
     } catch (e) {
       console.error("[handleGenerate] error", e);
@@ -690,7 +707,10 @@ export default function Home() {
 
               <Textarea
                 value={text}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => {
+                  setText(e.target.value);
+                  clearOutputs();
+                }}
                 placeholder="…or paste your content here"
                 className="min-h-[38vh] resize-none rounded-xl border-border/70 bg-background"
               />
@@ -757,6 +777,18 @@ export default function Home() {
                       Clear Chat
                     </Button>
                   )}
+                  {(activeMode === "flashcards" || activeMode === "quiz") &&
+                    outputs[activeMode] &&
+                    !loading && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleGenerate(activeMode, true)}
+                        className="text-primary hover:bg-primary/10"
+                      >
+                        ↻ Regenerate
+                      </Button>
+                    )}
                 </div>
               )}
 
