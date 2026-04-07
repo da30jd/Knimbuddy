@@ -161,7 +161,13 @@ export default function Home() {
   const [loading, setLoading] = useState<Mode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pdfs, setPdfs] = useState<
-    { name: string; pages: number; text: string; selected: boolean }[]
+    {
+      name: string;
+      pages: number;
+      text: string;
+      selected: boolean;
+      kind: "PDF" | "Word" | "PowerPoint" | "Excel";
+    }[]
   >([]);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -231,7 +237,13 @@ export default function Home() {
   }
 
   function rebuildText(
-    list: { name: string; pages: number; text: string; selected: boolean }[]
+    list: {
+      name: string;
+      pages: number;
+      text: string;
+      selected: boolean;
+      kind: "PDF" | "Word" | "PowerPoint" | "Excel";
+    }[]
   ) {
     const sel = list.filter((p) => p.selected);
     if (sel.length === 0) return "";
@@ -239,50 +251,115 @@ export default function Home() {
     return sel.map((p) => `=== ${p.name} ===\n${p.text}`).join("\n\n");
   }
 
+  async function extractPdf(file: File) {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.worker.min.mjs";
+    const buffer = await file.arrayBuffer();
+    const doc = await pdfjs.getDocument({ data: buffer }).promise;
+    let fullText = "";
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const content = await page.getTextContent();
+      fullText +=
+        content.items.map((it: { str?: string }) => it.str || "").join(" ") +
+        "\n\n";
+    }
+    return { text: fullText.trim(), pages: doc.numPages };
+  }
+
+  async function extractDocx(file: File) {
+    const mammoth = await import("mammoth");
+    const buffer = await file.arrayBuffer();
+    const result = await mammoth.extractRawText({ arrayBuffer: buffer });
+    return { text: result.value.trim(), pages: 1 };
+  }
+
+  async function extractPptx(file: File) {
+    // pptx is a zip of XML files. Slides live at ppt/slides/slideN.xml
+    // and text is inside <a:t> elements.
+    const JSZip = (await import("jszip")).default;
+    const buffer = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(buffer);
+    const slideEntries = Object.keys(zip.files)
+      .filter((p) => /^ppt\/slides\/slide\d+\.xml$/.test(p))
+      .sort((a, b) => {
+        const ai = parseInt(a.match(/slide(\d+)\.xml$/)![1], 10);
+        const bi = parseInt(b.match(/slide(\d+)\.xml$/)![1], 10);
+        return ai - bi;
+      });
+    const parser = new DOMParser();
+    const slides: string[] = [];
+    for (let i = 0; i < slideEntries.length; i++) {
+      const xml = await zip.file(slideEntries[i])!.async("string");
+      const doc = parser.parseFromString(xml, "application/xml");
+      const texts = Array.from(doc.getElementsByTagName("a:t"))
+        .map((n) => n.textContent || "")
+        .filter(Boolean);
+      slides.push(`Slide ${i + 1}:\n${texts.join("\n")}`);
+    }
+    return { text: slides.join("\n\n"), pages: slideEntries.length };
+  }
+
+  async function extractXlsx(file: File) {
+    const XLSX = await import("xlsx");
+    const buffer = await file.arrayBuffer();
+    const wb = XLSX.read(buffer, { type: "array" });
+    const parts: string[] = [];
+    for (const name of wb.SheetNames) {
+      const ws = wb.Sheets[name];
+      const csv = XLSX.utils.sheet_to_csv(ws).trim();
+      if (csv) parts.push(`Sheet: ${name}\n${csv}`);
+    }
+    return { text: parts.join("\n\n"), pages: wb.SheetNames.length };
+  }
+
+  function detectKind(
+    name: string
+  ): "PDF" | "Word" | "PowerPoint" | "Excel" | null {
+    const n = name.toLowerCase();
+    if (n.endsWith(".pdf")) return "PDF";
+    if (n.endsWith(".docx")) return "Word";
+    if (n.endsWith(".pptx")) return "PowerPoint";
+    if (n.endsWith(".xlsx")) return "Excel";
+    return null;
+  }
+
   async function handleFiles(files: File[]) {
-    const pdfFiles = files.filter(
-      (f) =>
-        f.type === "application/pdf" ||
-        f.name.toLowerCase().endsWith(".pdf")
-    );
-    if (pdfFiles.length === 0) {
-      setError("Please upload PDF files.");
+    const supported = files
+      .map((f) => ({ file: f, kind: detectKind(f.name) }))
+      .filter((x): x is { file: File; kind: NonNullable<ReturnType<typeof detectKind>> } => x.kind !== null);
+
+    if (supported.length === 0) {
+      setError("Please upload PDF, Word, PowerPoint, or Excel files.");
       return;
     }
+
     setUploading(true);
     setError(null);
     try {
-      // Lazy-load pdfjs in the browser so it never runs on the server.
-      const pdfjs = await import("pdfjs-dist");
-      // Worker is served from a CDN; pin to the installed package version.
-      pdfjs.GlobalWorkerOptions.workerSrc =
-        "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.worker.min.mjs";
-
       const added: {
         name: string;
         pages: number;
         text: string;
         selected: boolean;
+        kind: "PDF" | "Word" | "PowerPoint" | "Excel";
       }[] = [];
 
-      for (const file of pdfFiles) {
+      for (const { file, kind } of supported) {
         try {
-          const buffer = await file.arrayBuffer();
-          const doc = await pdfjs.getDocument({ data: buffer }).promise;
-          let fullText = "";
-          for (let i = 1; i <= doc.numPages; i++) {
-            const page = await doc.getPage(i);
-            const content = await page.getTextContent();
-            const pageText = content.items
-              .map((it: { str?: string }) => it.str || "")
-              .join(" ");
-            fullText += pageText + "\n\n";
-          }
+          let result: { text: string; pages: number };
+          if (kind === "PDF") result = await extractPdf(file);
+          else if (kind === "Word") result = await extractDocx(file);
+          else if (kind === "PowerPoint") result = await extractPptx(file);
+          else result = await extractXlsx(file);
+
           added.push({
             name: file.name,
-            pages: doc.numPages,
-            text: fullText.trim(),
+            pages: result.pages,
+            text: result.text,
             selected: true,
+            kind,
           });
         } catch (err) {
           console.error("[handleFiles] failed to parse", file.name, err);
@@ -441,8 +518,8 @@ export default function Home() {
                   <div className="rounded-xl border border-primary/20 bg-primary/5 px-3 py-2 text-sm">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                        {selected.length} PDF
-                        {selected.length === 1 ? "" : "s"} · {selPages} page
+                        {selected.length} file
+                        {selected.length === 1 ? "" : "s"} · {selPages} section
                         {selPages === 1 ? "" : "s"} ·{" "}
                         {selChars.toLocaleString()} chars
                       </div>
@@ -495,6 +572,19 @@ export default function Home() {
                             aria-label={`Include ${p.name}`}
                             className="h-4 w-4 shrink-0 cursor-pointer rounded border-border accent-blue-700"
                           />
+                          <span
+                            className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+                              p.kind === "PDF"
+                                ? "bg-red-100 text-red-700"
+                                : p.kind === "Word"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : p.kind === "PowerPoint"
+                                    ? "bg-orange-100 text-orange-700"
+                                    : "bg-green-100 text-green-700"
+                            }`}
+                          >
+                            {p.kind}
+                          </span>
                           <div className="min-w-0 flex-1">
                             <div
                               className={`truncate text-xs font-medium ${
@@ -506,8 +596,19 @@ export default function Home() {
                               {p.name}
                             </div>
                             <div className="text-[10px] text-muted-foreground">
-                              {p.pages} page{p.pages === 1 ? "" : "s"} ·{" "}
-                              {p.text.length.toLocaleString()} chars
+                              {p.pages}{" "}
+                              {p.kind === "PowerPoint"
+                                ? p.pages === 1
+                                  ? "slide"
+                                  : "slides"
+                                : p.kind === "Excel"
+                                  ? p.pages === 1
+                                    ? "sheet"
+                                    : "sheets"
+                                  : p.pages === 1
+                                    ? "page"
+                                    : "pages"}{" "}
+                              · {p.text.length.toLocaleString()} chars
                             </div>
                           </div>
                           <button
@@ -546,7 +647,7 @@ export default function Home() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="application/pdf,.pdf"
+                  accept=".pdf,.docx,.pptx,.xlsx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   multiple
                   className="hidden"
                   onChange={(e) => {
@@ -565,11 +666,11 @@ export default function Home() {
                   <>
                     <CloudUploadIcon className="h-10 w-10 text-primary transition-transform group-hover:scale-110" />
                     <span className="mt-2 text-sm font-semibold text-foreground">
-                      Drop PDFs here or click to browse
+                      Drop files here or click to browse
                     </span>
                     <span className="mt-1 text-xs text-muted-foreground">
-                      Upload one or more — we&apos;ll extract the text
-                      automatically
+                      PDF, Word, PowerPoint, or Excel — we&apos;ll extract the
+                      text automatically
                     </span>
                   </>
                 )}
