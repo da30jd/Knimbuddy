@@ -252,28 +252,46 @@ export default function Home() {
     setUploading(true);
     setError(null);
     try {
+      // Lazy-load pdfjs in the browser so it never runs on the server.
+      const pdfjs = await import("pdfjs-dist");
+      // Worker is served from a CDN; pin to the installed package version.
+      pdfjs.GlobalWorkerOptions.workerSrc =
+        "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.worker.min.mjs";
+
       const added: {
         name: string;
         pages: number;
         text: string;
         selected: boolean;
       }[] = [];
+
       for (const file of pdfFiles) {
-        const fd = new FormData();
-        fd.append("file", file);
-        const res = await fetch("/api/upload", { method: "POST", body: fd });
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error || `Upload failed for ${file.name}`);
-          continue;
+        try {
+          const buffer = await file.arrayBuffer();
+          const doc = await pdfjs.getDocument({ data: buffer }).promise;
+          let fullText = "";
+          for (let i = 1; i <= doc.numPages; i++) {
+            const page = await doc.getPage(i);
+            const content = await page.getTextContent();
+            const pageText = content.items
+              .map((it: { str?: string }) => it.str || "")
+              .join(" ");
+            fullText += pageText + "\n\n";
+          }
+          added.push({
+            name: file.name,
+            pages: doc.numPages,
+            text: fullText.trim(),
+            selected: true,
+          });
+        } catch (err) {
+          console.error("[handleFiles] failed to parse", file.name, err);
+          setError(
+            `Could not read ${file.name}: ${(err as Error).message || "parse error"}`
+          );
         }
-        added.push({
-          name: data.name,
-          pages: data.pages,
-          text: data.text || "",
-          selected: true,
-        });
       }
+
       if (added.length > 0) {
         setPdfs((prev) => {
           const next = [...prev, ...added];
