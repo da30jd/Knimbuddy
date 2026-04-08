@@ -751,8 +751,12 @@ export default function Home() {
     }
     setPdfs(updated);
     setText(newText);
-    setOutputs({});
     const mode = pageModal.mode;
+    setOutputs((prev) => {
+      const next = { ...prev };
+      delete next[mode];
+      return next;
+    });
     setPageModal(null);
     handleGenerate(mode, true, undefined, newText);
   }
