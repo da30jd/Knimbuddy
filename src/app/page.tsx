@@ -566,10 +566,17 @@ export default function Home() {
       name: string;
       pages: number;
       text: string;
+      pageTexts?: string[];
       selected: boolean;
       kind: "PDF" | "Word" | "PowerPoint" | "Excel";
     }[]
   >([]);
+  const [pageModal, setPageModal] = useState<null | {
+    mode: "summary" | "keypoints";
+  }>(null);
+  const [pageScopeWhole, setPageScopeWhole] = useState(true);
+  const [pageFrom, setPageFrom] = useState("");
+  const [pageTo, setPageTo] = useState("");
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -642,6 +649,7 @@ export default function Home() {
       name: string;
       pages: number;
       text: string;
+      pageTexts?: string[];
       selected: boolean;
       kind: "PDF" | "Word" | "PowerPoint" | "Excel";
     }[]
@@ -652,21 +660,79 @@ export default function Home() {
     return sel.map((p) => `=== ${p.name} ===\n${p.text}`).join("\n\n");
   }
 
+  function buildTextForPageRange(from: number, to: number): string {
+    const sel = pdfs.filter((p) => p.selected);
+    const parts: string[] = [];
+    for (const p of sel) {
+      if (p.pageTexts && p.pageTexts.length > 0) {
+        const lo = Math.max(1, Math.min(from, p.pageTexts.length));
+        const hi = Math.max(lo, Math.min(to, p.pageTexts.length));
+        const slice = p.pageTexts.slice(lo - 1, hi).join("\n\n").trim();
+        if (slice) {
+          parts.push(
+            sel.length > 1
+              ? `=== ${p.name} (pages ${lo}-${hi}) ===\n${slice}`
+              : slice
+          );
+        }
+      } else {
+        // Non-paginated source — include full text as fallback.
+        parts.push(sel.length > 1 ? `=== ${p.name} ===\n${p.text}` : p.text);
+      }
+    }
+    return parts.join("\n\n");
+  }
+
+  function maxSelectedPages(): number {
+    return pdfs
+      .filter((p) => p.selected)
+      .reduce((m, p) => Math.max(m, p.pageTexts?.length || p.pages || 0), 0);
+  }
+
+  function submitPageModal() {
+    if (!pageModal) return;
+    const mode = pageModal.mode;
+    if (pageScopeWhole) {
+      setPageModal(null);
+      handleGenerate(mode);
+      return;
+    }
+    const from = parseInt(pageFrom, 10);
+    const to = parseInt(pageTo, 10);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from < 1 || to < from) {
+      setError("Please enter a valid page range (e.g. 1 to 5).");
+      return;
+    }
+    const sliced = buildTextForPageRange(from, to);
+    if (!sliced.trim()) {
+      setError("No text found in that page range.");
+      return;
+    }
+    setPageModal(null);
+    handleGenerate(mode, false, undefined, sliced);
+  }
+
   async function extractPdf(file: File) {
     const pdfjs = await import("pdfjs-dist");
     pdfjs.GlobalWorkerOptions.workerSrc =
       "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.6.205/build/pdf.worker.min.mjs";
     const buffer = await file.arrayBuffer();
     const doc = await pdfjs.getDocument({ data: buffer }).promise;
-    let fullText = "";
+    const pageTexts: string[] = [];
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
       const content = await page.getTextContent();
-      fullText +=
-        content.items.map((it: { str?: string }) => it.str || "").join(" ") +
-        "\n\n";
+      const pageText = content.items
+        .map((it: { str?: string }) => it.str || "")
+        .join(" ")
+        .trim();
+      pageTexts.push(pageText);
     }
-    return { text: fullText.trim(), pages: doc.numPages };
+    return {
+      text: pageTexts.join("\n\n").trim(),
+      pages: doc.numPages,
+      pageTexts,
+    };
   }
 
   async function extractDocx(file: File) {
@@ -750,13 +816,14 @@ export default function Home() {
         name: string;
         pages: number;
         text: string;
+        pageTexts?: string[];
         selected: boolean;
         kind: "PDF" | "Word" | "PowerPoint" | "Excel";
       }[] = [];
 
       for (const { file, kind } of supported) {
         try {
-          let result: { text: string; pages: number };
+          let result: { text: string; pages: number; pageTexts?: string[] };
           if (kind === "PDF") result = await extractPdf(file);
           else if (kind === "Word") result = await extractDocx(file);
           else if (kind === "PowerPoint") result = await extractPptx(file);
@@ -766,6 +833,7 @@ export default function Home() {
             name: file.name,
             pages: result.pages,
             text: result.text,
+            pageTexts: result.pageTexts,
             selected: true,
             kind,
           });
@@ -837,8 +905,18 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  async function handleGenerate(mode: Mode, force = false, focus?: string) {
-    console.log("[handleGenerate] clicked", { mode, force, textLen: text.length });
+  async function handleGenerate(
+    mode: Mode,
+    force = false,
+    focus?: string,
+    textOverride?: string
+  ) {
+    const effectiveText = textOverride ?? text;
+    console.log("[handleGenerate] clicked", {
+      mode,
+      force,
+      textLen: effectiveText.length,
+    });
     if (mode === "ask") {
       setActiveMode("ask");
       setError(null);
@@ -850,14 +928,14 @@ export default function Home() {
       return;
     }
     if (loading) return;
-    if (!text.trim()) {
+    if (!effectiveText.trim()) {
       setActiveMode(mode);
       setError("Please upload a file or paste some text first.");
       return;
     }
     // Reuse cached output if we already generated this mode for the
     // current input. Skip the cache when the user explicitly regenerates.
-    if (!force && !focus && outputs[mode]) {
+    if (!force && !focus && !textOverride && outputs[mode]) {
       setActiveMode(mode);
       setError(null);
       return;
@@ -871,9 +949,9 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          text,
+          text: effectiveText,
           mode,
-          nonce: force || focus ? Date.now() : undefined,
+          nonce: force || focus || textOverride ? Date.now() : undefined,
           focus,
         }),
       });
@@ -1136,7 +1214,30 @@ export default function Home() {
                   return (
                     <button
                       key={m.id}
-                      onClick={() => handleGenerate(m.id)}
+                      onClick={() => {
+                        if (m.id === "summary" || m.id === "keypoints") {
+                          if (noPdfsSelected()) {
+                            setActiveMode(m.id);
+                            setError(
+                              "Please select at least one document to continue."
+                            );
+                            return;
+                          }
+                          if (!text.trim()) {
+                            setActiveMode(m.id);
+                            setError(
+                              "Please upload a file or paste some text first."
+                            );
+                            return;
+                          }
+                          setPageScopeWhole(true);
+                          setPageFrom("");
+                          setPageTo("");
+                          setPageModal({ mode: m.id });
+                          return;
+                        }
+                        handleGenerate(m.id);
+                      }}
                       disabled={disabled}
                       className={`relative rounded-xl border px-3 py-2 text-sm font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
                         isActive
@@ -1299,6 +1400,84 @@ export default function Home() {
           KnimBuddy — Built for students
         </div>
       </footer>
+
+      {pageModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setPageModal(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border/70 bg-card p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-1 text-lg font-bold text-foreground">
+              {pageModal.mode === "summary" ? "Summary" : "Key Points"} scope
+            </div>
+            <div className="mb-4 text-xs text-muted-foreground">
+              Choose what to generate from.
+            </div>
+
+            <label className="mb-3 flex cursor-pointer items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-sm">
+              <input
+                type="checkbox"
+                checked={pageScopeWhole}
+                onChange={() => setPageScopeWhole(true)}
+                className="h-4 w-4 accent-primary"
+              />
+              <span className="font-medium text-foreground">Whole text</span>
+            </label>
+
+            <label className="mb-2 flex cursor-pointer items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-sm">
+              <input
+                type="checkbox"
+                checked={!pageScopeWhole}
+                onChange={() => setPageScopeWhole(false)}
+                className="h-4 w-4 accent-primary"
+              />
+              <span className="flex flex-1 items-center gap-2 text-foreground">
+                <span className="font-medium">Pages</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={pageFrom}
+                  onChange={(e) => {
+                    setPageFrom(e.target.value);
+                    setPageScopeWhole(false);
+                  }}
+                  onFocus={() => setPageScopeWhole(false)}
+                  placeholder="1"
+                  className="w-16 rounded-md border border-border/70 bg-background px-2 py-1 text-sm outline-none focus:border-primary"
+                />
+                <span className="text-muted-foreground">to</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={pageTo}
+                  onChange={(e) => {
+                    setPageTo(e.target.value);
+                    setPageScopeWhole(false);
+                  }}
+                  onFocus={() => setPageScopeWhole(false)}
+                  placeholder={String(maxSelectedPages() || "")}
+                  className="w-16 rounded-md border border-border/70 bg-background px-2 py-1 text-sm outline-none focus:border-primary"
+                />
+              </span>
+            </label>
+            {maxSelectedPages() > 0 && (
+              <div className="mb-4 text-[11px] text-muted-foreground">
+                Available: 1–{maxSelectedPages()}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setPageModal(null)}>
+                Cancel
+              </Button>
+              <Button onClick={submitPageModal}>Generate</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
