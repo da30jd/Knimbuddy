@@ -561,22 +561,23 @@ export default function Home() {
     setOutputs({});
   }
   const [error, setError] = useState<string | null>(null);
-  const [pdfs, setPdfs] = useState<
-    {
-      name: string;
-      pages: number;
-      text: string;
-      pageTexts?: string[];
-      selected: boolean;
-      kind: "PDF" | "Word" | "PowerPoint" | "Excel";
-    }[]
-  >([]);
+  type PdfItem = {
+    name: string;
+    pages: number;
+    text: string;
+    pageTexts?: string[];
+    selected: boolean;
+    kind: "PDF" | "Word" | "PowerPoint" | "Excel";
+    fromPage?: number;
+    toPage?: number;
+  };
+  const [pdfs, setPdfs] = useState<PdfItem[]>([]);
   const [pageModal, setPageModal] = useState<null | {
     mode: "summary" | "keypoints";
   }>(null);
-  const [pageScopeWhole, setPageScopeWhole] = useState(true);
-  const [pageFrom, setPageFrom] = useState("");
-  const [pageTo, setPageTo] = useState("");
+  const [pageRangeDraft, setPageRangeDraft] = useState<
+    Record<number, { custom: boolean; from: string; to: string }>
+  >({});
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -644,72 +645,116 @@ export default function Home() {
     setError(null);
   }
 
-  function rebuildText(
-    list: {
-      name: string;
-      pages: number;
-      text: string;
-      pageTexts?: string[];
-      selected: boolean;
-      kind: "PDF" | "Word" | "PowerPoint" | "Excel";
-    }[]
-  ) {
+  function effectiveTextFor(p: PdfItem): string {
+    if (
+      p.pageTexts &&
+      p.pageTexts.length > 0 &&
+      (p.fromPage !== undefined || p.toPage !== undefined)
+    ) {
+      const lo = Math.max(1, p.fromPage ?? 1);
+      const hi = Math.min(p.pageTexts.length, p.toPage ?? p.pageTexts.length);
+      if (hi < lo) return "";
+      return p.pageTexts.slice(lo - 1, hi).join("\n\n").trim();
+    }
+    return p.text;
+  }
+
+  function effectiveCharsFor(p: PdfItem): number {
+    return effectiveTextFor(p).length;
+  }
+
+  function rebuildText(list: PdfItem[]) {
     const sel = list.filter((p) => p.selected);
     if (sel.length === 0) return "";
-    if (sel.length === 1) return sel[0].text;
-    return sel.map((p) => `=== ${p.name} ===\n${p.text}`).join("\n\n");
+    if (sel.length === 1) return effectiveTextFor(sel[0]);
+    return sel
+      .map((p) => {
+        const hasRange = p.fromPage !== undefined || p.toPage !== undefined;
+        const label = hasRange
+          ? `=== ${p.name} (pages ${p.fromPage ?? 1}-${
+              p.toPage ?? p.pageTexts?.length ?? p.pages
+            }) ===`
+          : `=== ${p.name} ===`;
+        return `${label}\n${effectiveTextFor(p)}`;
+      })
+      .join("\n\n");
   }
 
-  function buildTextForPageRange(from: number, to: number): string {
-    const sel = pdfs.filter((p) => p.selected);
-    const parts: string[] = [];
-    for (const p of sel) {
-      if (p.pageTexts && p.pageTexts.length > 0) {
-        const lo = Math.max(1, Math.min(from, p.pageTexts.length));
-        const hi = Math.max(lo, Math.min(to, p.pageTexts.length));
-        const slice = p.pageTexts.slice(lo - 1, hi).join("\n\n").trim();
-        if (slice) {
-          parts.push(
-            sel.length > 1
-              ? `=== ${p.name} (pages ${lo}-${hi}) ===\n${slice}`
-              : slice
-          );
-        }
-      } else {
-        // Non-paginated source — include full text as fallback.
-        parts.push(sel.length > 1 ? `=== ${p.name} ===\n${p.text}` : p.text);
-      }
+  function openPageModal(mode: "summary" | "keypoints") {
+    if (noPdfsSelected()) {
+      setActiveMode(mode);
+      setError("Please select at least one document to continue.");
+      return;
     }
-    return parts.join("\n\n");
-  }
-
-  function maxSelectedPages(): number {
-    return pdfs
-      .filter((p) => p.selected)
-      .reduce((m, p) => Math.max(m, p.pageTexts?.length || p.pages || 0), 0);
+    if (!text.trim()) {
+      setActiveMode(mode);
+      setError("Please upload a file or paste some text first.");
+      return;
+    }
+    const draft: Record<number, { custom: boolean; from: string; to: string }> =
+      {};
+    pdfs.forEach((p, i) => {
+      if (!p.selected) return;
+      const hasCustom = p.fromPage !== undefined || p.toPage !== undefined;
+      const max = p.pageTexts?.length || p.pages || 0;
+      draft[i] = {
+        custom: hasCustom,
+        from: hasCustom ? String(p.fromPage ?? 1) : "",
+        to: hasCustom ? String(p.toPage ?? max) : "",
+      };
+    });
+    setPageRangeDraft(draft);
+    setError(null);
+    setPageModal({ mode });
   }
 
   function submitPageModal() {
     if (!pageModal) return;
+    // Validate
+    for (const [idxStr, d] of Object.entries(pageRangeDraft)) {
+      if (!d.custom) continue;
+      const i = parseInt(idxStr, 10);
+      const p = pdfs[i];
+      if (!p) continue;
+      const max = p.pageTexts?.length || p.pages || 0;
+      const f = parseInt(d.from, 10);
+      const t = parseInt(d.to, 10);
+      if (
+        !Number.isFinite(f) ||
+        !Number.isFinite(t) ||
+        f < 1 ||
+        t < f ||
+        (max > 0 && t > max)
+      ) {
+        setError(
+          `Invalid page range for ${p.name}${max ? ` (1–${max})` : ""}.`
+        );
+        return;
+      }
+    }
+    const updated = pdfs.map((p, i) => {
+      if (!p.selected) return p;
+      const d = pageRangeDraft[i];
+      if (!d || !d.custom) {
+        return { ...p, fromPage: undefined, toPage: undefined };
+      }
+      return {
+        ...p,
+        fromPage: parseInt(d.from, 10),
+        toPage: parseInt(d.to, 10),
+      };
+    });
+    const newText = rebuildText(updated);
+    if (!newText.trim()) {
+      setError("No text found in the selected page ranges.");
+      return;
+    }
+    setPdfs(updated);
+    setText(newText);
+    setOutputs({});
     const mode = pageModal.mode;
-    if (pageScopeWhole) {
-      setPageModal(null);
-      handleGenerate(mode);
-      return;
-    }
-    const from = parseInt(pageFrom, 10);
-    const to = parseInt(pageTo, 10);
-    if (!Number.isFinite(from) || !Number.isFinite(to) || from < 1 || to < from) {
-      setError("Please enter a valid page range (e.g. 1 to 5).");
-      return;
-    }
-    const sliced = buildTextForPageRange(from, to);
-    if (!sliced.trim()) {
-      setError("No text found in that page range.");
-      return;
-    }
     setPageModal(null);
-    handleGenerate(mode, false, undefined, sliced);
+    handleGenerate(mode, true, undefined, newText);
   }
 
   async function extractPdf(file: File) {
@@ -1015,9 +1060,17 @@ export default function Home() {
             <CardContent className="space-y-4">
               {pdfs.length > 0 && (() => {
                 const selected = pdfs.filter((p) => p.selected);
-                const selPages = selected.reduce((s, p) => s + p.pages, 0);
+                const selPages = selected.reduce((s, p) => {
+                  const max = p.pageTexts?.length || p.pages;
+                  if (p.fromPage !== undefined || p.toPage !== undefined) {
+                    const lo = Math.max(1, p.fromPage ?? 1);
+                    const hi = Math.min(max, p.toPage ?? max);
+                    return s + Math.max(0, hi - lo + 1);
+                  }
+                  return s + p.pages;
+                }, 0);
                 const selChars = selected.reduce(
-                  (s, p) => s + p.text.length,
+                  (s, p) => s + effectiveCharsFor(p),
                   0
                 );
                 const allOn = selected.length === pdfs.length;
@@ -1116,7 +1169,15 @@ export default function Home() {
                                   : p.pages === 1
                                     ? "page"
                                     : "pages"}{" "}
-                              · {p.text.length.toLocaleString()} chars
+                              · {effectiveCharsFor(p).toLocaleString()} chars
+                              {(p.fromPage !== undefined ||
+                                p.toPage !== undefined) && (
+                                <span className="ml-1 text-primary">
+                                  (p. {p.fromPage ?? 1}–
+                                  {p.toPage ?? (p.pageTexts?.length || p.pages)}
+                                  )
+                                </span>
+                              )}
                             </div>
                           </div>
                           <button
@@ -1215,25 +1276,11 @@ export default function Home() {
                     <button
                       key={m.id}
                       onClick={() => {
-                        if (m.id === "summary" || m.id === "keypoints") {
-                          if (noPdfsSelected()) {
-                            setActiveMode(m.id);
-                            setError(
-                              "Please select at least one document to continue."
-                            );
-                            return;
-                          }
-                          if (!text.trim()) {
-                            setActiveMode(m.id);
-                            setError(
-                              "Please upload a file or paste some text first."
-                            );
-                            return;
-                          }
-                          setPageScopeWhole(true);
-                          setPageFrom("");
-                          setPageTo("");
-                          setPageModal({ mode: m.id });
+                        if (
+                          (m.id === "summary" || m.id === "keypoints") &&
+                          !outputs[m.id]
+                        ) {
+                          openPageModal(m.id);
                           return;
                         }
                         handleGenerate(m.id);
@@ -1286,6 +1333,18 @@ export default function Home() {
                         variant="ghost"
                         size="sm"
                         onClick={() => handleGenerate(activeMode, true)}
+                        className="text-primary hover:bg-primary/10"
+                      >
+                        ↻ Regenerate
+                      </Button>
+                    )}
+                  {(activeMode === "summary" || activeMode === "keypoints") &&
+                    outputs[activeMode] &&
+                    !loading && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => openPageModal(activeMode)}
                         className="text-primary hover:bg-primary/10"
                       >
                         ↻ Regenerate
@@ -1407,69 +1466,115 @@ export default function Home() {
           onClick={() => setPageModal(null)}
         >
           <div
-            className="w-full max-w-md rounded-2xl border border-border/70 bg-card p-6 shadow-xl"
+            className="max-h-[85vh] w-full max-w-lg overflow-auto rounded-2xl border border-border/70 bg-card p-6 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-1 text-lg font-bold text-foreground">
               {pageModal.mode === "summary" ? "Summary" : "Key Points"} scope
             </div>
             <div className="mb-4 text-xs text-muted-foreground">
-              Choose what to generate from.
+              Pick page ranges per document. Unselected documents are not
+              included.
             </div>
 
-            <label className="mb-3 flex cursor-pointer items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-sm">
-              <input
-                type="checkbox"
-                checked={pageScopeWhole}
-                onChange={() => setPageScopeWhole(true)}
-                className="h-4 w-4 accent-primary"
-              />
-              <span className="font-medium text-foreground">Whole text</span>
-            </label>
+            <div className="space-y-3">
+              {pdfs.map((p, i) => {
+                if (!p.selected) return null;
+                const draft = pageRangeDraft[i] || {
+                  custom: false,
+                  from: "",
+                  to: "",
+                };
+                const max = p.pageTexts?.length || p.pages || 0;
+                const setDraft = (
+                  patch: Partial<{ custom: boolean; from: string; to: string }>
+                ) =>
+                  setPageRangeDraft((prev) => ({
+                    ...prev,
+                    [i]: { ...draft, ...patch },
+                  }));
+                return (
+                  <div
+                    key={i}
+                    className="rounded-xl border border-border/70 bg-background p-3"
+                  >
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="truncate text-sm font-semibold text-foreground">
+                        {p.name}
+                      </div>
+                      <div className="shrink-0 text-[11px] text-muted-foreground">
+                        {max} {max === 1 ? "page" : "pages"}
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={!draft.custom}
+                          onChange={() => setDraft({ custom: false })}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        <span className="text-foreground">All pages</span>
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={draft.custom}
+                          onChange={() =>
+                            setDraft({
+                              custom: true,
+                              from: draft.from || "1",
+                              to: draft.to || String(max || ""),
+                            })
+                          }
+                          className="h-4 w-4 accent-primary"
+                        />
+                        <span className="flex flex-1 items-center gap-2 text-foreground">
+                          <span>Custom</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={max || undefined}
+                            value={draft.from}
+                            onFocus={() =>
+                              !draft.custom && setDraft({ custom: true })
+                            }
+                            onChange={(e) =>
+                              setDraft({ custom: true, from: e.target.value })
+                            }
+                            placeholder="1"
+                            className="w-16 rounded-md border border-border/70 bg-background px-2 py-1 text-sm outline-none focus:border-primary"
+                          />
+                          <span className="text-muted-foreground">to</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={max || undefined}
+                            value={draft.to}
+                            onFocus={() =>
+                              !draft.custom && setDraft({ custom: true })
+                            }
+                            onChange={(e) =>
+                              setDraft({ custom: true, to: e.target.value })
+                            }
+                            placeholder={String(max || "")}
+                            className="w-16 rounded-md border border-border/70 bg-background px-2 py-1 text-sm outline-none focus:border-primary"
+                          />
+                        </span>
+                      </label>
+                      {p.kind !== "PDF" && (
+                        <div className="text-[10px] text-muted-foreground">
+                          Page selection only applies to PDFs — full text will
+                          be used.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
 
-            <label className="mb-2 flex cursor-pointer items-center gap-3 rounded-lg border border-border/70 px-3 py-2 text-sm">
-              <input
-                type="checkbox"
-                checked={!pageScopeWhole}
-                onChange={() => setPageScopeWhole(false)}
-                className="h-4 w-4 accent-primary"
-              />
-              <span className="flex flex-1 items-center gap-2 text-foreground">
-                <span className="font-medium">Pages</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={pageFrom}
-                  onChange={(e) => {
-                    setPageFrom(e.target.value);
-                    setPageScopeWhole(false);
-                  }}
-                  onFocus={() => setPageScopeWhole(false)}
-                  placeholder="1"
-                  className="w-16 rounded-md border border-border/70 bg-background px-2 py-1 text-sm outline-none focus:border-primary"
-                />
-                <span className="text-muted-foreground">to</span>
-                <input
-                  type="number"
-                  min={1}
-                  value={pageTo}
-                  onChange={(e) => {
-                    setPageTo(e.target.value);
-                    setPageScopeWhole(false);
-                  }}
-                  onFocus={() => setPageScopeWhole(false)}
-                  placeholder={String(maxSelectedPages() || "")}
-                  className="w-16 rounded-md border border-border/70 bg-background px-2 py-1 text-sm outline-none focus:border-primary"
-                />
-              </span>
-            </label>
-            {maxSelectedPages() > 0 && (
-              <div className="mb-4 text-[11px] text-muted-foreground">
-                Available: 1–{maxSelectedPages()}
-              </div>
-            )}
-
-            <div className="flex justify-end gap-2">
+            <div className="mt-5 flex justify-end gap-2">
               <Button variant="outline" onClick={() => setPageModal(null)}>
                 Cancel
               </Button>
