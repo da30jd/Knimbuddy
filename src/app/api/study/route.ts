@@ -31,10 +31,11 @@ export async function POST(req: NextRequest) {
     return new Response("API key not found", { status: 500 });
   }
 
-  const { text, mode, nonce } = (await req.json()) as {
+  const { text, mode, nonce, focus } = (await req.json()) as {
     text?: string;
     mode?: Mode;
     nonce?: string | number;
+    focus?: string;
   };
   console.log("[/api/study] mode:", mode, "textLen:", text?.length);
 
@@ -45,9 +46,13 @@ export async function POST(req: NextRequest) {
   console.log("[/api/study] starting stream");
 
   const wantsVariety = mode === "flashcards" || mode === "quiz";
-  const userContent = nonce
-    ? `${text}\n\n---\n(Variation token: ${nonce}. Produce a fresh set that does NOT repeat questions from previous generations — pick different concepts, angles, or phrasings.)`
-    : text;
+  let userContent = text;
+  if (nonce) {
+    userContent += `\n\n---\n(Variation token: ${nonce}. Produce a fresh set that does NOT repeat questions from previous generations — pick different concepts, angles, or phrasings.)`;
+  }
+  if (focus && focus.trim()) {
+    userContent += `\n\n---\nFOCUS: The student previously missed questions in the following areas. Generate a NEW quiz that specifically targets these weak areas with fresh questions (do not repeat the previous questions verbatim, but cover the same underlying concepts):\n${focus}`;
+  }
 
   const stream = client.messages.stream({
     model: "claude-sonnet-4-20250514",

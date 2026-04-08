@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -236,6 +236,304 @@ function FlashcardsView({ raw }: { raw: string }) {
           Next →
         </Button>
       </div>
+    </div>
+  );
+}
+
+type QuizQuestion = {
+  num: string;
+  q: string;
+  options: { letter: string; text: string }[];
+};
+type QuizAnswer = { letter: string; explanation: string };
+
+function parseQuiz(raw: string): {
+  questions: QuizQuestion[];
+  answers: Record<string, QuizAnswer>;
+} {
+  const split = raw.split(/##\s*Answers/i);
+  const qPart = split[0] || "";
+  const aPart = split[1] || "";
+  const questions: QuizQuestion[] = [];
+  const qRe = /\*\*(\d+)\.\s*([\s\S]*?)\*\*\s*([\s\S]*?)(?=\n\s*\*\*\d+\.|\s*$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = qRe.exec(qPart)) !== null) {
+    const num = m[1];
+    const qText = m[2].trim();
+    const optsRaw = m[3];
+    const options: { letter: string; text: string }[] = [];
+    const optRe = /^\s*([A-D])[.)]\s*(.+)$/gm;
+    let om: RegExpExecArray | null;
+    while ((om = optRe.exec(optsRaw)) !== null) {
+      options.push({ letter: om[1], text: om[2].trim() });
+    }
+    if (options.length >= 2) questions.push({ num, q: qText, options });
+  }
+  const answers: Record<string, QuizAnswer> = {};
+  const aRe = /^\s*(\d+)[.)]\s*([A-D])\s*[—\-–:.]\s*(.+)$/gm;
+  let am: RegExpExecArray | null;
+  while ((am = aRe.exec(aPart)) !== null) {
+    answers[am[1]] = { letter: am[2], explanation: am[3].trim() };
+  }
+  return { questions, answers };
+}
+
+function ScoreCircle({ correct, total }: { correct: number; total: number }) {
+  const radius = 56;
+  const circ = 2 * Math.PI * radius;
+  const pct = total > 0 ? correct / total : 0;
+  const [offset, setOffset] = useState(circ);
+  const [displayCount, setDisplayCount] = useState(0);
+  useEffect(() => {
+    const t = setTimeout(() => setOffset(circ * (1 - pct)), 50);
+    const start = performance.now();
+    const dur = 1100;
+    let raf = 0;
+    const tick = (now: number) => {
+      const p = Math.min(1, (now - start) / dur);
+      setDisplayCount(Math.round(p * correct));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      clearTimeout(t);
+      cancelAnimationFrame(raf);
+    };
+  }, [correct, total, circ, pct]);
+  const color =
+    pct >= 0.8 ? "#16a34a" : pct >= 0.5 ? "#f59e0b" : "#ef4444";
+  return (
+    <div className="relative h-36 w-36">
+      <svg className="h-full w-full -rotate-90" viewBox="0 0 140 140">
+        <circle
+          cx="70"
+          cy="70"
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="12"
+          className="text-muted-foreground/20"
+        />
+        <circle
+          cx="70"
+          cy="70"
+          r={radius}
+          fill="none"
+          stroke={color}
+          strokeWidth="12"
+          strokeLinecap="round"
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          style={{ transition: "stroke-dashoffset 1.1s ease-out" }}
+        />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <div className="text-3xl font-bold text-foreground">
+          {displayCount}/{total}
+        </div>
+        <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          {Math.round(pct * 100)}%
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InteractiveQuizView({
+  raw,
+  onRegenerate,
+  isGenerating,
+}: {
+  raw: string;
+  onRegenerate: (focus?: string) => void;
+  isGenerating: boolean;
+}) {
+  const parsed = useMemo(() => parseQuiz(raw), [raw]);
+  const [selected, setSelected] = useState<Record<string, string>>({});
+  const [submitted, setSubmitted] = useState(false);
+
+  useEffect(() => {
+    setSelected({});
+    setSubmitted(false);
+  }, [raw]);
+
+  if (parsed.questions.length === 0) {
+    return <Markdown>{raw}</Markdown>;
+  }
+
+  const total = parsed.questions.length;
+  const wrong = parsed.questions.filter((q) => {
+    const ans = parsed.answers[q.num];
+    return !ans || selected[q.num] !== ans.letter;
+  });
+  const correctCount = total - wrong.length;
+  const allAnswered = parsed.questions.every((q) => !!selected[q.num]);
+
+  function buildFocusText() {
+    return wrong
+      .map((q) => {
+        const ans = parsed.answers[q.num];
+        return `- ${q.q}${ans ? ` (correct concept: ${ans.explanation})` : ""}`;
+      })
+      .join("\n");
+  }
+
+  return (
+    <div className="space-y-5">
+      {!submitted ? (
+        <>
+          <div className="text-xs text-muted-foreground">
+            Select an answer for each question, then submit.
+          </div>
+          {parsed.questions.map((q) => (
+            <div
+              key={q.num}
+              className="rounded-xl border border-border/70 bg-card p-4"
+            >
+              <div className="mb-3 text-sm font-semibold text-foreground">
+                {q.num}. {q.q}
+              </div>
+              <div className="space-y-2">
+                {q.options.map((opt) => {
+                  const id = `q${q.num}-${opt.letter}`;
+                  const checked = selected[q.num] === opt.letter;
+                  return (
+                    <label
+                      key={opt.letter}
+                      htmlFor={id}
+                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 text-sm transition ${
+                        checked
+                          ? "border-primary bg-primary/10"
+                          : "border-border/70 hover:border-primary/50 hover:bg-primary/5"
+                      }`}
+                    >
+                      <input
+                        id={id}
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          setSelected((prev) => ({
+                            ...prev,
+                            [q.num]: checked ? "" : opt.letter,
+                          }))
+                        }
+                        className="mt-0.5 h-4 w-4 accent-primary"
+                      />
+                      <span>
+                        <span className="font-semibold">{opt.letter}.</span>{" "}
+                        {opt.text}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">
+              {Object.values(selected).filter(Boolean).length} of {total}{" "}
+              answered
+            </div>
+            <Button
+              onClick={() => setSubmitted(true)}
+              disabled={!allAnswered}
+            >
+              Submit Answers
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex flex-col items-center gap-3 rounded-xl border border-border/70 bg-card p-6">
+            <ScoreCircle correct={correctCount} total={total} />
+            <div className="text-center text-sm font-medium text-foreground">
+              {correctCount === total
+                ? "Perfect score! 🎉"
+                : correctCount >= total * 0.8
+                ? "Great work!"
+                : correctCount >= total * 0.5
+                ? "Good effort — keep practicing."
+                : "Keep going — review the areas below."}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            {parsed.questions.map((q) => {
+              const ans = parsed.answers[q.num];
+              const userLetter = selected[q.num];
+              const isCorrect = ans && userLetter === ans.letter;
+              return (
+                <div
+                  key={q.num}
+                  className={`rounded-xl border p-4 ${
+                    isCorrect
+                      ? "border-green-500/40 bg-green-50 dark:bg-green-950/20"
+                      : "border-red-500/40 bg-red-50 dark:bg-red-950/20"
+                  }`}
+                >
+                  <div className="mb-2 text-sm font-semibold text-foreground">
+                    {q.num}. {q.q}
+                  </div>
+                  <div className="text-xs text-foreground">
+                    <div>
+                      Your answer:{" "}
+                      <span className="font-semibold">
+                        {userLetter || "—"}
+                      </span>{" "}
+                      {isCorrect ? "✓" : "✗"}
+                    </div>
+                    {ans && (
+                      <div>
+                        Correct answer:{" "}
+                        <span className="font-semibold">{ans.letter}</span>
+                      </div>
+                    )}
+                    {ans && (
+                      <div className="mt-1 text-muted-foreground">
+                        {ans.explanation}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {wrong.length > 0 && (
+            <div className="rounded-xl border border-orange-500/40 bg-orange-50 p-4 dark:bg-orange-950/20">
+              <div className="mb-2 text-sm font-bold text-orange-700 dark:text-orange-400">
+                Areas to work on
+              </div>
+              <ul className="ml-5 list-disc space-y-1 text-xs text-foreground">
+                {wrong.map((q) => (
+                  <li key={q.num}>{q.q}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <div className="flex flex-col items-stretch gap-2 rounded-xl border border-border/70 bg-card p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="text-sm font-medium text-foreground">
+              Generate a new quiz:
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                variant="outline"
+                onClick={() => onRegenerate()}
+                disabled={isGenerating}
+              >
+                All material
+              </Button>
+              <Button
+                onClick={() => onRegenerate(buildFocusText())}
+                disabled={isGenerating || wrong.length === 0}
+              >
+                Focus on missed ({wrong.length})
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -539,7 +837,7 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  async function handleGenerate(mode: Mode, force = false) {
+  async function handleGenerate(mode: Mode, force = false, focus?: string) {
     console.log("[handleGenerate] clicked", { mode, force, textLen: text.length });
     if (mode === "ask") {
       setActiveMode("ask");
@@ -559,7 +857,7 @@ export default function Home() {
     }
     // Reuse cached output if we already generated this mode for the
     // current input. Skip the cache when the user explicitly regenerates.
-    if (!force && outputs[mode]) {
+    if (!force && !focus && outputs[mode]) {
       setActiveMode(mode);
       setError(null);
       return;
@@ -572,7 +870,12 @@ export default function Home() {
       const res = await fetch("/api/study", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, mode, nonce: force ? Date.now() : undefined }),
+        body: JSON.stringify({
+          text,
+          mode,
+          nonce: force || focus ? Date.now() : undefined,
+          focus,
+        }),
       });
       if (!res.ok || !res.body) {
         const body = await res.text();
@@ -960,6 +1263,14 @@ export default function Home() {
                   ) : output ? (
                     activeMode === "flashcards" && !isGenerating ? (
                       <FlashcardsView raw={output} />
+                    ) : activeMode === "quiz" && !isGenerating ? (
+                      <InteractiveQuizView
+                        raw={output}
+                        isGenerating={isGenerating}
+                        onRegenerate={(focus) =>
+                          handleGenerate("quiz", true, focus)
+                        }
+                      />
                     ) : (
                       <>
                         <Markdown>{output}</Markdown>
